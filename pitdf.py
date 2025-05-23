@@ -2,7 +2,7 @@ import pandas as pd
 from typing import List, Dict, Optional
 
 class PointInTimeData:
-    def __init__(self, key_columns: List[str], value_columns: List[str]):
+    def __init__(self, key_columns: List[str], value_columns: List[str], default_overlap_mode: str = 'raise', load_path: Optional[str] = None):
         """
         Initializes the PIT store.
         key_columns: list of key fields
@@ -10,8 +10,15 @@ class PointInTimeData:
         """
         self.key_columns = key_columns
         self.value_columns = value_columns
+        self.default_overlap_mode = default_overlap_mode
         self.columns = key_columns + ["from_time", "to_time", "change_time"] + value_columns
-        self.df = pd.DataFrame(columns=self.columns)
+        if load_path:
+            self.load(load_path)
+        else:
+            self.df = pd.DataFrame(columns=self.columns)
+            self.df["from_time"] = pd.to_datetime(self.df["from_time"], utc=True)
+            self.df["to_time"] = pd.to_datetime(self.df["to_time"], utc=True)
+            self.df["change_time"] = pd.to_datetime(self.df["change_time"], utc=True)
         self.df["from_time"] = pd.to_datetime(self.df["from_time"], utc=True)
         self.df["to_time"] = pd.to_datetime(self.df["to_time"], utc=True)
         self.df["change_time"] = pd.to_datetime(self.df["change_time"], utc=True)
@@ -42,7 +49,9 @@ class PointInTimeData:
             else:
                 raise ValueError(f"Invalid overlap handling mode: {mode}")
 
-    def add(self, row: Dict, overlap_mode: str = 'raise'):
+    def add(self, row: Dict, overlap_mode: Optional[str] = None):
+        if overlap_mode is None:
+            overlap_mode = self.default_overlap_mode
         row = row.copy()
         row["from_time"] = pd.to_datetime(row["from_time"], utc=True)
         row["to_time"] = pd.NaT
@@ -50,7 +59,9 @@ class PointInTimeData:
         if not self._check_overlap(row, mode=overlap_mode): return
         self.df = pd.concat([self.df, pd.DataFrame([row])], ignore_index=True)
 
-    def upsert(self, row: Dict, overlap_mode: str = 'raise'):
+    def upsert(self, row: Dict, overlap_mode: Optional[str] = None):
+        if overlap_mode is None:
+            overlap_mode = self.default_overlap_mode
         row = row.copy()
         from_time = pd.to_datetime(row["from_time"], utc=True)
         mask = self._match_key(row)
@@ -58,8 +69,17 @@ class PointInTimeData:
             self.df.loc[mask, "to_time"] = from_time
         self.add(row, overlap_mode=overlap_mode)
 
-    def batch_upsert(self, records: List[Dict], overlap_mode: str = 'raise'):
-        df_in = pd.DataFrame(records)
+    def batch_upsert(self, records, overlap_mode: Optional[str] = None):
+        """
+        Insert or update records from a list of dicts or a DataFrame.
+        Validates that input contains all required columns.
+        """
+        if overlap_mode is None:
+            overlap_mode = self.default_overlap_mode
+        df_in = records if isinstance(records, pd.DataFrame) else pd.DataFrame(records)
+        missing_cols = set(self.key_columns + ["from_time"] + self.value_columns) - set(df_in.columns)
+        if missing_cols:
+            raise ValueError(f"Missing required columns in input: {missing_cols}")
         df_in["from_time"] = pd.to_datetime(df_in["from_time"], utc=True)
         for row in df_in.to_dict(orient="records"):
             self.upsert(row, overlap_mode=overlap_mode)
